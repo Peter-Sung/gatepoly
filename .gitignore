@@ -1,0 +1,7 @@
+# 의존성과 빌드 산출물을 Git에서 제외합니다.
+node_modules/
+dist/
+*.tsbuildinfo
+dev-server.log
+*.zip
+
