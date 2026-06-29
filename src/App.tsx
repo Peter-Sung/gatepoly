@@ -1,5 +1,5 @@
 // 게이트폴리 게임의 화면과 진행 규칙을 관리합니다.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BadgeCheck, Coins, Flag, Play, RefreshCw, RotateCcw, Shuffle, Trophy } from "lucide-react";
 import { boardTiles, finishIndex, gateImageById } from "./board";
 import { clearSavedGame, loadSavedGame, saveGame } from "./storage";
@@ -90,6 +90,10 @@ function getQuestionImage(kind: ChallengeKind) {
   return kind === "gate" ? "/img/gate_question_bg.png" : "/img/quest_question_bg.png";
 }
 
+function canRetryUntilCorrect(kind: ChallengeKind) {
+  return kind === "gate" || kind === "quest" || kind === "hazard";
+}
+
 function getVisibleTileLabel(label: string) {
   return label.startsWith("퀘스트") ? "퀘스트" : label;
 }
@@ -129,6 +133,7 @@ function advanceTurn(state: GameState, actorId: string): GameState {
 
 function App() {
   const [state, setState] = useState<GameState>(() => loadSavedGame() ?? initialState);
+  const autoSkippedPlayerRef = useRef<string | null>(null);
   const [playerCount, setPlayerCount] = useState(Math.max(2, state.players.length || 2));
   const [names, setNames] = useState<string[]>(state.players.length ? state.players.map((player) => player.name) : ["", ""]);
   const [gateBank, setGateBank] = useState<QuestionBank | null>(null);
@@ -163,6 +168,26 @@ function App() {
       setGameNotice("게임이 종료 되었습니다. 게임 결과를 확인하세요.");
     }
   }, [state.phase, state.message]);
+
+  useEffect(() => {
+    if (state.phase !== "playing" || state.activeChallenge || !currentPlayer?.skipNext) {
+      return;
+    }
+
+    if (autoSkippedPlayerRef.current === currentPlayer.id) {
+      return;
+    }
+
+    autoSkippedPlayerRef.current = currentPlayer.id;
+    setVacationNotice("연차휴가로 이번 턴을 쉽니다. 다음 플레이어에게 순서가 넘어 갑니다.");
+    setState((current) =>
+      advanceTurn({
+        ...current,
+        players: updatePlayer(current.players, currentPlayer.id, (player) => ({ ...player, skipNext: false })),
+        message: `${currentPlayer.name}님은 연차휴가로 이번 턴을 쉽니다.`
+      }, currentPlayer.id)
+    );
+  }, [state.phase, state.activeChallenge, currentPlayer?.id, currentPlayer?.skipNext]);
 
   useEffect(() => {
     if (!state.activeChallenge?.startedAt || state.activeChallenge.answered) {
@@ -234,18 +259,6 @@ function App() {
       return;
     }
 
-    if (currentPlayer.skipNext) {
-      setVacationNotice("연차휴가중입니다. 이번 턴은 쉽니다.");
-      setState((current) =>
-        advanceTurn({
-          ...current,
-          players: updatePlayer(current.players, currentPlayer.id, (player) => ({ ...player, skipNext: false })),
-          message: `${currentPlayer.name}님은 연차휴가로 이번 턴을 쉽니다.`
-        }, currentPlayer.id)
-      );
-      return;
-    }
-
     const targetPosition = currentPlayer.position + steps;
     const reachedFinish = targetPosition >= finishIndex;
     const nextPosition = reachedFinish ? finishIndex : targetPosition;
@@ -297,6 +310,7 @@ function App() {
             gateId: tile.gateId,
             remaining: 30,
             answered: false,
+            selectedAnswers: [],
             showCardBack: true
           },
           message: `${currentPlayer.name}님이 ${getVisibleTileLabel(tile.label)} 칸에 도착했습니다. 카드 뒷면을 클릭하세요.`
@@ -356,11 +370,33 @@ function App() {
 
   function applyAnswer(current: GameState, selectedAnswer: string, timeout = false): GameState {
     const challenge = current.activeChallenge;
-    if (!challenge || !challenge.question || challenge.answered) {
+    if (!challenge || !challenge.question) {
+      return current;
+    }
+
+    const followUpAttempt = challenge.answered && challenge.needsManualAward && !challenge.isCorrect && canRetryUntilCorrect(challenge.kind);
+    if (challenge.answered && !followUpAttempt) {
       return current;
     }
 
     const isCorrect = !timeout && normalizeAnswer(selectedAnswer) === normalizeAnswer(challenge.question.answer);
+    const selectedAnswers = selectedAnswer ? [...(challenge.selectedAnswers ?? []), selectedAnswer] : challenge.selectedAnswers ?? [];
+
+    if (followUpAttempt) {
+      return {
+        ...current,
+        activeChallenge: {
+          ...challenge,
+          selectedAnswer,
+          selectedAnswers,
+          isCorrect,
+          feedbackMessage: isCorrect ? undefined : "오답입니다. 다른 보기를 선택하세요.",
+          suppressCoinMessage: true
+        },
+        message: isCorrect ? "정답입니다." : "오답입니다. 다른 보기를 선택하세요."
+      };
+    }
+
     let coinDelta = 0;
 
     if (isCorrect) {
@@ -390,6 +426,10 @@ function App() {
         answered: true,
         isCorrect,
         selectedAnswer,
+        selectedAnswers,
+        feedbackMessage: undefined,
+        needsManualAward: challenge.needsManualAward || (!isCorrect && challenge.kind !== "bonus"),
+        suppressCoinMessage: false,
         coinDelta
       },
       message: isCorrect ? "정답입니다. 코인 처리가 완료되었습니다." : "오답 또는 시간초과입니다. 코인 처리가 완료되었습니다."
@@ -720,7 +760,7 @@ function TurnPanel({
         <strong>{currentPlayer.name}</strong>
         <em>보유코인 {currentPlayer.coins}개</em>
       </div>
-      {currentPlayer.skipNext ? <p className="hint">이번 턴은 연차휴가로 쉽니다. 아무 숫자나 누르면 턴이 넘어갑니다.</p> : <p className="hint">주사위 결과를 선택하세요.</p>}
+      {currentPlayer.skipNext ? <p className="hint">연차휴가로 이번 턴을 쉽니다.</p> : <p className="hint">주사위 결과를 선택하세요.</p>}
       <div className="dice-buttons">
         {[1, 2, 3].map((value) => (
           <button key={value} disabled={Boolean(activeChallenge)} onClick={() => onMove(value)}>
@@ -784,7 +824,8 @@ function ChallengeModal({
 }) {
   const player = players.find((item) => item.id === challenge.playerId);
   const otherPlayers = players.filter((item) => item.id !== challenge.playerId && item.status === "active");
-  const showManualAward = challenge.answered && challenge.isCorrect === false && challenge.kind !== "bonus";
+  const showManualAward = challenge.answered && Boolean(challenge.needsManualAward) && challenge.kind !== "bonus";
+  const canContinueChoosingOptions = challenge.answered && Boolean(challenge.needsManualAward) && !challenge.isCorrect && canRetryUntilCorrect(challenge.kind);
 
   return (
     <div className="modal-backdrop">
@@ -811,30 +852,41 @@ function ChallengeModal({
               <div className="option-list">
                 {challenge.question.options.map((option) => {
                   const isAnswerOption = normalizeAnswer(option) === normalizeAnswer(challenge.question!.answer);
-                  const isSelectedOption = challenge.selectedAnswer
-                    ? normalizeAnswer(option) === normalizeAnswer(challenge.selectedAnswer)
-                    : false;
+                  const wasSelectedOption = (challenge.selectedAnswers ?? []).some(
+                    (answer) => normalizeAnswer(option) === normalizeAnswer(answer)
+                  );
                   const showCorrectOption = challenge.answered && (challenge.isCorrect || Boolean(challenge.manualAwardedPlayerId));
-                  const showWrongOption = challenge.answered && !challenge.isCorrect && isSelectedOption;
+                  const showWrongOption = wasSelectedOption && !isAnswerOption;
                   const optionClassName = [
                     showCorrectOption && isAnswerOption ? "correct-option" : "",
                     showWrongOption ? "wrong-option" : ""
                   ].filter(Boolean).join(" ");
 
                   return (
-                    <button key={option} className={optionClassName} disabled={challenge.answered} onClick={() => onAnswer(option)}>
+                    <button
+                      key={option}
+                      className={optionClassName}
+                      disabled={(!canContinueChoosingOptions && challenge.answered) || (wasSelectedOption && !isAnswerOption)}
+                      onClick={() => onAnswer(option)}
+                    >
                       {option}
                     </button>
                   );
                 })}
               </div>
 
+              {challenge.feedbackMessage && !challenge.answered ? (
+                <div className="answer-result wrong">
+                  <strong>{challenge.feedbackMessage}</strong>
+                </div>
+              ) : null}
+
               {challenge.answered ? (
                 <div className={challenge.isCorrect ? "answer-result correct" : "answer-result wrong"}>
-                  <strong>{challenge.isCorrect ? "정답입니다." : "오답 또는 시간초과입니다."}</strong>
-                  <span>{formatCoinDelta(challenge.coinDelta ?? 0)}</span>
+                  <strong>{challenge.feedbackMessage ?? (challenge.isCorrect ? "정답입니다." : "오답 또는 시간초과입니다.")}</strong>
+                  {!challenge.suppressCoinMessage ? <span>{formatCoinDelta(challenge.coinDelta ?? 0)}</span> : null}
                   {challenge.isCorrect ? <p>{challenge.question.explanation}</p> : null}
-                  <button className="primary-button" onClick={onClose}>다음 플레이어</button>
+                  {!canContinueChoosingOptions ? <button className="primary-button" onClick={onClose}>다음 플레이어</button> : null}
                 </div>
               ) : null}
             </div>

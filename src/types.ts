@@ -57,6 +57,10 @@ export interface ActiveChallenge {
   answered: boolean;
   isCorrect?: boolean;
   selectedAnswer?: string;
+  selectedAnswers?: string[];
+  feedbackMessage?: string;
+  needsManualAward?: boolean;
+  suppressCoinMessage?: boolean;
   coinDelta?: number;
   manualAwardedPlayerId?: string;
   manualAwardMessage?: string;
